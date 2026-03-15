@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data_folder_path = get_workspace_root();
     data_folder_path.push("data");
 
-    let mut input_file_path = data_folder_path.join("bourne.mp4");
+    let mut input_file_path = data_folder_path.join("safe.mp4");
     let mut output_file_path = data_folder_path.join("out.dat");
 
     parse_args(
@@ -105,8 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut enc = Encoder::new();
 
-    // Set up arithmetic coding context(s)
-    let mut pixel_difference_pdf = VectorCountSymbolModel::new((0..=255).collect());
+    // Set up arithmetic coding contexts (one model per 8-bit context value).
+    let mut pixel_difference_pdfs: Vec<VectorCountSymbolModel<i32>> =
+        (0..256).map(|_| VectorCountSymbolModel::new((0..=255).collect())).collect();
 
     // Process frames
     for frame in iter.filter_frames() {
@@ -124,6 +125,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for c in 0..width {
                     let pixel_index = (r * width + c) as usize;
 
+                    // context is selected by reconstructed left neighbor
+                    // if on left edge, fall back to prior-frame pixel at same location.
+                    let context_index = if c > 0 {
+                        current_frame[pixel_index - 1] as usize
+                    } else {
+                        prior_frame[pixel_index] as usize
+                    };
+
                     // Encode difference with same pixel in prior frame.
                     // Normalize and modulate difference to 8-bit range.
                     let pixel_difference = (((current_frame[pixel_index] as i32)
@@ -131,10 +140,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         + 256)
                         % 256;
 
-                    enc.encode(&pixel_difference, &pixel_difference_pdf, &mut bw);
+                    enc.encode(
+                        &pixel_difference,
+                        &pixel_difference_pdfs[context_index],
+                        &mut bw,
+                    );
 
                     // Update context
-                    pixel_difference_pdf.incr_count(&pixel_difference);
+                    pixel_difference_pdfs[context_index].incr_count(&pixel_difference);
                 }
             }
 
@@ -178,7 +191,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let mut dec = Decoder::new();
 
-        let mut pixel_difference_pdf = VectorCountSymbolModel::new((0..=255).collect());
+        let mut pixel_difference_pdfs: Vec<VectorCountSymbolModel<i32>> =
+            (0..256).map(|_| VectorCountSymbolModel::new((0..=255).collect())).collect();
 
         // Set up initial prior frame as uniform medium gray
         let mut prior_frame = vec![128 as u8; (width * height) as usize];
@@ -191,17 +205,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 let current_frame: Vec<u8> = frame.data; // <- raw pixel y values
+                //reconstructed frame
+                let mut reconstructed_frame = vec![0 as u8; (width * height) as usize];
 
                 // Process pixels in row major order.
                 for r in 0..height {
                     for c in 0..width {
                         let pixel_index = (r * width + c) as usize;
-                        let decoded_pixel_difference = dec.decode(&pixel_difference_pdf, &mut br).to_owned();
-                        pixel_difference_pdf.incr_count(&decoded_pixel_difference);
 
-                        let pixel_value = (prior_frame[pixel_index] as i32 + decoded_pixel_difference) % 256;
+                        let context_index = if c > 0 {
+                            reconstructed_frame[pixel_index - 1] as usize
+                        } else {
+                            prior_frame[pixel_index] as usize
+                        };
 
-                        if pixel_value != current_frame[pixel_index] as i32 {
+                        let decoded_pixel_difference =
+                            dec.decode(&pixel_difference_pdfs[context_index], &mut br)
+                                .to_owned();
+                        pixel_difference_pdfs[context_index].incr_count(&decoded_pixel_difference);
+
+                        let pixel_value =
+                            ((prior_frame[pixel_index] as i32 + decoded_pixel_difference) % 256) as u8;
+                        reconstructed_frame[pixel_index] = pixel_value;
+
+                        if pixel_value != current_frame[pixel_index] {
                             println!(
                                 " error at ({}, {}), should decode {}, got {}",
                                 c, r, current_frame[pixel_index], pixel_value
@@ -212,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 println!("correct.");
-                prior_frame = current_frame;
+                prior_frame = reconstructed_frame;
             } else {
                 break 'outer_loop;
             }
