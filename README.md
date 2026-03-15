@@ -5,4 +5,6 @@ We'll still encode one pixel at the time, just not using a single probability mo
 
 Using cargo run -p assgn1 -- -check_decode for bourne.mp4, we get 10 frames decoded, Average size: 5,893,402 bits per frame, Compression ratio: 2.81
 
-Using another popular video (safe.mp4, check it out!), we get 10 frames encoded, average size (bits): 6516277, compression ratio: 2.55
+Using another popular video (safe.mp4, check it out!), we get 10 frames encoded, average size (bits): 6,516,277, compression ratio: 2.55
+
+Both of these compression ratios mean that the compressed video is about more than half the size of the original video!
